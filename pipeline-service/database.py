@@ -21,7 +21,6 @@ def get_db():
 
 
 def init_db() -> None:
-    # Imported lazily to avoid circular imports.
-    from models.customer import Customer  # noqa: F401
-
-    Base.metadata.create_all(bind=engine)
+    # The `customers` table is created by dlt on first POST /api/ingest (merge/upsert).
+    # Avoid SQLAlchemy create_all here: a pre-created table conflicts with dlt metadata columns.
+    pass

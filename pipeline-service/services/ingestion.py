@@ -1,28 +1,14 @@
+"""Fetch paginated customer JSON from Flask and load into Postgres using dlt (merge/upsert)."""
+
 from __future__ import annotations
 
-from datetime import date, datetime
-from decimal import Decimal
+import os
 from typing import Any
 
+import dlt
 import requests
-from sqlalchemy.dialects.postgresql import insert
-from sqlalchemy.orm import Session
 
-from models.customer import Customer
-
-MOCK_SERVER_BASE_URL = "http://mock-server:5000"
-
-
-def _parse_date(value: str | None) -> date | None:
-    if not value:
-        return None
-    return date.fromisoformat(value)
-
-
-def _parse_datetime(value: str | None) -> datetime | None:
-    if not value:
-        return None
-    return datetime.fromisoformat(value)
+MOCK_SERVER_BASE_URL = os.getenv("MOCK_SERVER_BASE_URL", "http://mock-server:5000")
 
 
 def _fetch_all_customers(limit: int = 100) -> list[dict[str, Any]]:
@@ -51,38 +37,21 @@ def _fetch_all_customers(limit: int = 100) -> list[dict[str, Any]]:
     return customers
 
 
-def run_ingestion(db: Session) -> int:
-    raw_customers = _fetch_all_customers()
-    records_processed = 0
+def run_ingestion() -> int:
+    database_url = os.environ["DATABASE_URL"]
+    rows = _fetch_all_customers()
+    if not rows:
+        return 0
 
-    for customer in raw_customers:
-        stmt = insert(Customer).values(
-            customer_id=customer["customer_id"],
-            first_name=customer["first_name"],
-            last_name=customer["last_name"],
-            email=customer["email"],
-            phone=customer.get("phone"),
-            address=customer.get("address"),
-            date_of_birth=_parse_date(customer.get("date_of_birth")),
-            account_balance=Decimal(str(customer.get("account_balance", 0))),
-            created_at=_parse_datetime(customer.get("created_at")),
-        )
-
-        upsert_stmt = stmt.on_conflict_do_update(
-            index_elements=[Customer.customer_id],
-            set_={
-                "first_name": stmt.excluded.first_name,
-                "last_name": stmt.excluded.last_name,
-                "email": stmt.excluded.email,
-                "phone": stmt.excluded.phone,
-                "address": stmt.excluded.address,
-                "date_of_birth": stmt.excluded.date_of_birth,
-                "account_balance": stmt.excluded.account_balance,
-                "created_at": stmt.excluded.created_at,
-            },
-        )
-        db.execute(upsert_stmt)
-        records_processed += 1
-
-    db.commit()
-    return records_processed
+    pipeline = dlt.pipeline(
+        pipeline_name="customer_ingestion",
+        destination=dlt.destinations.postgres(database_url),
+        dataset_name="public",
+    )
+    pipeline.run(
+        rows,
+        table_name="customers",
+        write_disposition={"disposition": "merge", "strategy": "upsert"},
+        primary_key="customer_id",
+    )
+    return len(rows)

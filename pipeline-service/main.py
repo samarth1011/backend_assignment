@@ -1,12 +1,14 @@
-from decimal import Decimal
-
 from fastapi import Depends, FastAPI, HTTPException, Query
-from sqlalchemy import select
+from sqlalchemy import inspect, select
 from sqlalchemy.orm import Session
 
-from database import get_db, init_db
+from database import engine, get_db, init_db
 from models.customer import Customer
 from services.ingestion import run_ingestion
+
+
+def _customers_table_exists() -> bool:
+    return inspect(engine).has_table("customers", schema="public")
 
 app = FastAPI(title="Pipeline Service")
 
@@ -16,7 +18,22 @@ def on_startup() -> None:
     init_db()
 
 
+def _iso_date_or_dt(value) -> str | None:
+    if value is None:
+        return None
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    return str(value)
+
+
 def _serialize_customer(customer: Customer) -> dict:
+    bal = customer.account_balance
+    if bal is not None and not isinstance(bal, (int, float)):
+        try:
+            bal = float(bal)
+        except (TypeError, ValueError):
+            bal = customer.account_balance
+
     return {
         "customer_id": customer.customer_id,
         "first_name": customer.first_name,
@@ -24,20 +41,16 @@ def _serialize_customer(customer: Customer) -> dict:
         "email": customer.email,
         "phone": customer.phone,
         "address": customer.address,
-        "date_of_birth": customer.date_of_birth.isoformat()
-        if customer.date_of_birth
-        else None,
-        "account_balance": float(customer.account_balance)
-        if isinstance(customer.account_balance, Decimal)
-        else customer.account_balance,
-        "created_at": customer.created_at.isoformat() if customer.created_at else None,
+        "date_of_birth": _iso_date_or_dt(customer.date_of_birth),
+        "account_balance": bal,
+        "created_at": _iso_date_or_dt(customer.created_at),
     }
 
 
 @app.post("/api/ingest")
-def ingest_customers(db: Session = Depends(get_db)):
+def ingest_customers():
     try:
-        processed = run_ingestion(db)
+        processed = run_ingestion()
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Ingestion failed: {exc}") from exc
 
@@ -50,6 +63,8 @@ def get_customers(
     limit: int = Query(default=10, ge=1),
     db: Session = Depends(get_db),
 ):
+    if not _customers_table_exists():
+        return {"data": [], "total": 0, "page": page, "limit": limit}
     total = db.query(Customer).count()
     offset = (page - 1) * limit
     records = (
@@ -69,6 +84,8 @@ def get_customers(
 
 @app.get("/api/customers/{customer_id}")
 def get_customer(customer_id: str, db: Session = Depends(get_db)):
+    if not _customers_table_exists():
+        raise HTTPException(status_code=404, detail="Customer not found")
     customer = db.scalar(select(Customer).where(Customer.customer_id == customer_id))
     if customer is None:
         raise HTTPException(status_code=404, detail="Customer not found")
